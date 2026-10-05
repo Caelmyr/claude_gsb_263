@@ -149,6 +149,12 @@ window.Common = (function () {
         return `<div class="field"><label>${esc(p.label)}${hint}</label>
           <input type="color" data-key="${p.key}" value="${esc(v)}"></div>`;
       }
+      if (p.type === "json") {
+        const txt = typeof v === "string" ? v : JSON.stringify(v || {}, null, 1);
+        return `<div class="field"><label>${esc(p.label)}${hint}</label>
+          <textarea data-key="${p.key}" rows="6" spellcheck="false"
+            style="width:100%;background:var(--bg-soft);color:var(--text);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:8px;font-family:var(--mono);font-size:11px;resize:vertical">${esc(txt)}</textarea></div>`;
+      }
       return `<div class="field"><label>${esc(p.label)}${hint}</label>
         <input type="number" data-key="${p.key}" value="${v}"></div>`;
     }).join("");
@@ -159,13 +165,18 @@ window.Common = (function () {
         const k = inp.dataset.key;
         if (inp.type === "range" || inp.type === "number") out[k] = Number(inp.value);
         else if (inp.type === "checkbox") out[k] = inp.checked;
+        else if (inp.tagName === "TEXTAREA") {
+          try { out[k] = JSON.parse(inp.value || "{}"); }
+          catch (e) { out[k] = inp.value; }  // 交给后端报错/兜底
+        }
         else out[k] = inp.value;
       });
       return out;
     }
     function bind(root, onChange) {
       root.querySelectorAll("[data-key]").forEach((inp) => {
-        const evt = inp.type === "range" ? "input" : (inp.type === "checkbox" ? "change" : "change");
+        const evt = inp.type === "range" ? "input"
+          : (inp.type === "checkbox" || inp.tagName === "TEXTAREA" ? "change" : "change");
         inp.addEventListener(evt, () => {
           if (inp.type === "range") {
             const v = root.querySelector(`[data-val="${inp.dataset.key}"]`);

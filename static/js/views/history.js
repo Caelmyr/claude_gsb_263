@@ -54,28 +54,39 @@ window.Views.history = (function () {
 
   function renderDetail(el, e) {
     const box = el.querySelector("#hi-detail");
-    const nodes = (e.pipeline_snapshot && e.pipeline_snapshot.nodes) || [];
+    const snapshot = e.pipeline_snapshot || {};
+    const isLocal = snapshot.kind === "local";
+    const localLayers = isLocal ? (snapshot.document && snapshot.document.layers) || [] : [];
+    const nodes = snapshot.nodes || [];
     const nodeResults = e.node_results || [];
     box.innerHTML = `
       <div class="keypoint-stats" style="line-height:1.9">
         <div><span class="dim">状态</span> <span class="badge ${e.status === "ok" ? "green" : "red"}">${e.status === "ok" ? "成功" : "失败"}</span></div>
         <div><span class="dim">图像</span> ${C.esc(e.image_name || "-")}</div>
-        <div><span class="dim">流水线</span> ${C.esc(e.pipeline_name || "临时")}（${e.node_count} 节点）</div>
+        <div><span class="dim">类型</span> ${isLocal ? "🖌️ 局部调整" : C.esc(e.pipeline_name || "临时") + (isLocal ? "" : `（${e.node_count} 节点）`)}</div>
         <div><span class="dim">耗时</span> ${C.fmtMs(e.duration_ms)} · <span class="dim">缓存</span> ${e.cache_hit ? "命中" : "计算"}</div>
         ${e.error ? `<div><span class="dim">错误</span> ${C.esc(e.error)}</div>` : ""}
-        <div><span class="dim">版本快照</span> ${nodes.map((n) => `<span class="badge">${C.esc(n.type)}</span>`).join(" ") || "无节点"}</div>
+        ${isLocal
+          ? `<div><span class="dim">调整图层</span> ${localLayers.map((l) =>
+              `<span class="badge">${C.esc(l.name)} ×${l.strokes.length}</span>`).join(" ") || "无"}</div>`
+          : `<div><span class="dim">版本快照</span> ${nodes.map((n) => `<span class="badge">${C.esc(n.type)}</span>`).join(" ") || "无节点"}</div>`}
         ${nodeResults.length ? `<div><span class="dim">节点执行</span> ${nodeResults.map((n) => `${n.ok ? "✓" : "✗"}${n.node_id}`).join(" ")}</div>` : ""}
       </div>
       ${e.result_id ? `<img src="/api/results/${e.result_id}/file" style="width:100%;border-radius:8px;margin-top:10px">` : ""}
+      ${isLocal && e.image_id ? `<img src="/api/images/${e.image_id}/file" style="width:100%;border-radius:8px;margin-top:10px">` : ""}
       <div class="toolbar" style="margin-top:12px">
-        <button class="btn" id="hi-restore">恢复为流水线</button>
+        ${isLocal ? "" : `<button class="btn" id="hi-restore">恢复为流水线</button>`}
         <button class="btn btn-danger" id="hi-del">删除记录</button>
       </div>`;
-    box.querySelector("#hi-restore").onclick = async () => {
-      const p = await Api.post(`/api/history/${e.id}/restore`);
-      C.toast("已恢复为流水线：" + p.name, "success");
-      await C.refreshPipelines();
-    };
+    if (!isLocal) {
+      box.querySelector("#hi-restore").onclick = async () => {
+        try {
+          const p = await Api.post(`/api/history/${e.id}/restore`);
+          C.toast("已恢复为流水线：" + p.name, "success");
+          await C.refreshPipelines();
+        } catch (err) { C.toast(err.message, "error"); }
+      };
+    }
     box.querySelector("#hi-del").onclick = async () => {
       if (!confirm("删除该历史记录（连同结果文件）？")) return;
       await Api.del(`/api/history/${e.id}`);

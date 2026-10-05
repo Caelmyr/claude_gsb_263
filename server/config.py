@@ -21,6 +21,7 @@ IMAGES_JSON = os.path.join(META_DIR, "images.json")
 PIPELINES_JSON = os.path.join(META_DIR, "pipelines.json")
 HISTORY_JSON = os.path.join(META_DIR, "history.json")
 PRESETS_JSON = os.path.join(META_DIR, "presets.json")
+LOCAL_DOCS_JSON = os.path.join(META_DIR, "local_docs.json")
 QUEUE_JSON = os.path.join(META_DIR, "queue.json")
 CACHE_JSON = os.path.join(META_DIR, "cache.json")
 
@@ -32,6 +33,7 @@ MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 MAX_DIM = 1600                    # 算法工作副本的最长边（超出则先降采样）
 PREVIEW_DIM = 900                 # 前端展示/下载的完整预览尺寸
+LOCAL_PREVIEW_DIM = 1100          # 局部调整实时预览的最长边
 THUMB_DIM = 220                   # 缩略图最长边
 FEATURE_WORK_DIM = 360            # 特征提取/检测/分割的工作分辨率（加速）
 

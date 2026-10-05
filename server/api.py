@@ -5,12 +5,14 @@
 """
 import io
 import json
+import os
+import uuid
 
 from flask import Blueprint, jsonify, request, send_file
 from PIL import Image, ImageChops
 
 from . import config, pipeline as pipeline_engine
-from .algorithms import detection, features, segmentation, style, util
+from .algorithms import detection, features, local, segmentation, style, util
 from .batch import BatchManager, process_image
 from .cache import ResultCache, make_key
 from .history import HistoryManager
@@ -28,6 +30,7 @@ cache = ResultCache()
 history = HistoryManager()
 batch = BatchManager(image_store, cache, history)
 presets_store = JsonStore(config.PRESETS_JSON, [])
+local_docs_store = JsonStore(config.LOCAL_DOCS_JSON, {})
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -448,6 +451,200 @@ def run_style():
 
 
 # ---------------------------------------------------------------------------
+# 局部调整（画笔蒙版 + 区域色彩调整）
+# ---------------------------------------------------------------------------
+def _load_local_source(data):
+    """按 source_type 载入底图。返回 (image, source_desc) 或 (None, error_tuple)。"""
+    source_type = data.get("source_type", "image")
+    if source_type == "result":
+        rid = data.get("source_id")
+        img = cache.result_image(rid)
+        if img is None:
+            return None, ({"error": "结果图不存在"}, 404)
+        return util.ensure_rgb(img), {"source_type": "result", "source_id": rid}
+    image_id = data.get("image_id") or data.get("source_id")
+    rec = image_store.get(image_id)
+    if not rec:
+        return None, ({"error": "图像不存在"}, 404)
+    path = image_store.file_path(image_id)
+    if not path:
+        return None, ({"error": "图像文件缺失"}, 404)
+    return util.ensure_rgb(Image.open(path)), {"source_type": "image", "source_id": image_id}
+
+
+def _local_basename(data, desc):
+    """提交保存时的文件名基底。"""
+    sid = desc.get("source_id") or ""
+    if desc["source_type"] == "image":
+        rec = image_store.get(sid)
+        base = rec["filename"] if rec else "image"
+    else:
+        base = f"result_{sid[:8]}"
+    name = (data.get("name") or "").strip()
+    return name or f"局部调整-{os.path.splitext(base)[0]}.png"
+
+
+@bp.post("/local/render")
+def local_render():
+    """局部调整实时预览：降采样渲染并走结果缓存。"""
+    data = request.get_json(silent=True) or {}
+    doc = local.normalize_document(data.get("document") or {})
+    src, load_info = _load_local_source(data)
+    if src is None:
+        body, status = load_info
+        return jsonify(body), status
+
+    work = util.downscale_to_max(src, config.LOCAL_PREVIEW_DIM)
+    # 指纹：来源 + 规范化后的文档 + 预览尺寸
+    key = make_key("local-preview", data.get("source_type", "image"),
+                   data.get("image_id") or data.get("source_id"),
+                   work.size[0], work.size[1],
+                   json.dumps(doc, sort_keys=True, ensure_ascii=False))
+    cached = cache.get(key)
+    if cached:
+        entry = cache.get_entry(cached) or {}
+        return jsonify({"result_id": cached, "cache_hit": True,
+                        "file_url": f"/api/results/{cached}/file",
+                        "layers": entry.get("meta", {}).get("layers", [])})
+
+    result, layer_infos = local.render(work, doc)
+    result_id = cache.put(key, result, {"layers": layer_infos, "kind": "local-preview"})
+    return jsonify({"result_id": result_id, "cache_hit": False,
+                    "file_url": f"/api/results/{result_id}/file",
+                    "layers": layer_infos})
+
+
+@bp.post("/local/commit")
+def local_commit():
+    """全分辨率提交局部调整：渲染 -> 作为新图像入库，可继续叠加其它处理。"""
+    data = request.get_json(silent=True) or {}
+    doc = local.normalize_document(data.get("document") or {})
+    src, load_info = _load_local_source(data)
+    if src is None:
+        body, status = load_info
+        return jsonify(body), status
+
+    # 全分辨率：与普通流水线一致，先压到 MAX_DIM 工作上限
+    work = util.downscale_to_max(src, config.MAX_DIM)
+    result, layer_infos = local.render(work, doc)
+
+    buf = io.BytesIO()
+    result.save(buf, "PNG")
+    data_bytes = buf.getvalue()
+    name = _local_basename(data, {"source_type": data.get("source_type", "image"),
+                                  "source_id": data.get("source_id") or data.get("image_id")})
+    rec = image_store.save_upload(data_bytes, name)
+
+    # 记录一条历史，保留文档快照，便于回看与恢复
+    entry = history.add({
+        "image_id": rec["id"],
+        "image_name": rec["filename"],
+        "pipeline_id": None,
+        "pipeline_name": "局部调整",
+        "pipeline_snapshot": {"kind": "local", "document": doc},
+        "node_count": len(doc["layers"]),
+        "result_id": None,
+        "cache_hit": False,
+        "status": "ok",
+        "error": None,
+        "node_results": None,
+        "duration_ms": 0,
+    })
+    return jsonify({"image": _image_view(rec), "history_id": entry["id"],
+                    "layers": layer_infos})
+
+
+@bp.get("/local/docs")
+def local_docs_list():
+    """列出保存的局部调整工程。"""
+    items = sorted(local_docs_store.read().values(),
+                   key=lambda d: d.get("updated_at", ""), reverse=True)
+    return jsonify({"docs": [_local_doc_view(d) for d in items]})
+
+
+@bp.get("/local/docs/<doc_id>")
+def local_docs_get(doc_id):
+    d = local_docs_store.read().get(doc_id)
+    if not d:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_local_doc_view(d))
+
+
+@bp.post("/local/docs")
+def local_docs_create():
+    data = request.get_json(silent=True) or {}
+    doc_id = uuid.uuid4().hex
+    rec = {
+        "id": doc_id,
+        "name": (data.get("name") or "未命名局部调整")[:60],
+        "image_id": data.get("image_id"),
+        "source_type": data.get("source_type", "image"),
+        "source_id": data.get("source_id") or data.get("image_id"),
+        "document": local.normalize_document(data.get("document") or {}),
+        "created_at": now_iso(), "updated_at": now_iso(),
+    }
+
+    def _upd(store):
+        store = dict(store)
+        store[doc_id] = rec
+        return store
+
+    local_docs_store.update(_upd)
+    return jsonify(_local_doc_view(rec))
+
+
+@bp.put("/local/docs/<doc_id>")
+def local_docs_update(doc_id):
+    data = request.get_json(silent=True) or {}
+
+    def _upd(store):
+        store = dict(store)
+        rec = store.get(doc_id)
+        if not rec:
+            return store
+        rec = dict(rec)
+        if data.get("name") is not None:
+            rec["name"] = str(data.get("name"))[:60]
+        if data.get("document") is not None:
+            rec["document"] = local.normalize_document(data.get("document"))
+        if data.get("image_id") is not None:
+            rec["image_id"] = data.get("image_id")
+        if data.get("source_id") is not None:
+            rec["source_id"] = data.get("source_id")
+        if data.get("source_type") is not None:
+            rec["source_type"] = data.get("source_type")
+        rec["updated_at"] = now_iso()
+        store[doc_id] = rec
+        return store
+
+    local_docs_store.update(_upd)
+    rec = local_docs_store.read().get(doc_id)
+    if not rec:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_local_doc_view(rec))
+
+
+@bp.delete("/local/docs/<doc_id>")
+def local_docs_delete(doc_id):
+    def _upd(store):
+        store = dict(store)
+        store.pop(doc_id, None)
+        return store
+
+    local_docs_store.update(_upd)
+    return jsonify({"ok": True})
+
+
+def _local_doc_view(d):
+    return {
+        "id": d["id"], "name": d.get("name", ""),
+        "image_id": d.get("image_id"), "source_type": d.get("source_type", "image"),
+        "source_id": d.get("source_id"), "document": d.get("document", {"layers": []}),
+        "created_at": d.get("created_at"), "updated_at": d.get("updated_at"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 对比 / 差异
 # ---------------------------------------------------------------------------
 @bp.post("/compare/diff")
@@ -628,7 +825,10 @@ def restore_history(history_id):
     snapshot = history.restore_snapshot(history_id)
     if snapshot is None:
         return jsonify({"error": "not found"}), 404
-    pid = __import__("uuid").uuid4().hex
+    if snapshot.get("kind") == "local":
+        return jsonify({"error": "该记录来自局部调整，不是滤镜链流水线，无法恢复为流水线；"
+                                  "结果已作为新图像保存在图像库中"}), 400
+    pid = uuid.uuid4().hex
     e = history.get(history_id)
     rec = {
         "id": pid,

@@ -9,6 +9,7 @@ from .algorithms import detection as _detection
 from .algorithms import features as _features
 from .algorithms import filters as _filters
 from .algorithms import geometry as _geometry
+from .algorithms import local as _local
 from .algorithms import segmentation as _segmentation
 from .algorithms import style as _style
 
@@ -33,6 +34,10 @@ def _number(key, label, default=0, desc=""):
 
 def _pick_color(key, label, default="#000000", desc=""):
     return {"key": key, "label": label, "type": "color", "default": default, "desc": desc}
+
+
+def _json(key, label, default, desc=""):
+    return {"key": key, "label": label, "type": "json", "default": default, "desc": desc}
 
 
 def _wrap(fn):
@@ -80,6 +85,13 @@ NODES["saturation"] = _node(
     "saturation", "饱和度", "滤镜",
     [_range("amount", "饱和度", -100, 100, 1, 0)],
     _filters.saturation, desc="调整色彩饱和度")
+
+NODES["local_adjust"] = _node(
+    "local_adjust", "局部调整", "滤镜",
+    [_json("document", "涂抹文档（局部调整页导出）", {"layers": []},
+           "由「局部调整」页保存的画笔图层 JSON；直接粘贴即可进入滤镜链/批处理")],
+    _local.local_adjust_node,
+    desc="按画笔蒙版对局部做亮度/对比度/饱和度/色温调整")
 
 NODES["blur"] = _node(
     "blur", "模糊", "滤镜",
