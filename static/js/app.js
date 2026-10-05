@@ -10,6 +10,7 @@
     { name: "batch", ico: "📦", title: "批量处理" },
     { name: "compare", ico: "⚖️", title: "结果对比" },
     { name: "tuning", ico: "🎚️", title: "参数调优与预设" },
+    { name: "local", ico: "🖌️", title: "局部调整" },
     { name: "history", ico: "🕘", title: "历史记录与版本" },
   ];
 

@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request, send_file
 from PIL import Image, ImageChops
 
 from . import config, pipeline as pipeline_engine
-from .algorithms import detection, features, segmentation, style, util
+from .algorithms import detection, features, local_adjust, segmentation, style, util
 from .batch import BatchManager, process_image
 from .cache import ResultCache, make_key
 from .history import HistoryManager
@@ -445,6 +445,79 @@ def run_style():
     if err:
         return err[0], err[1]
     return jsonify(res)
+
+
+# ---------------------------------------------------------------------------
+# 局部调整（画笔蒙版：亮度/对比度/饱和度/色温，多图层可叠加）
+# ---------------------------------------------------------------------------
+_MAX_LAYERS = 20
+_MAX_POINTS_PER_STROKE = 4000
+_MAX_STROKES_PER_LAYER = 200
+
+
+def _sanitize_layers(layers):
+    """对前端传来的图层/笔画做裁剪与清洗，防止超大请求拖垮光栅化。"""
+    clean = []
+    for layer in (layers or [])[:_MAX_LAYERS]:
+        strokes = []
+        for s in (layer.get("strokes") or [])[:_MAX_STROKES_PER_LAYER]:
+            pts = (s.get("points") or [])[:_MAX_POINTS_PER_STROKE]
+            strokes.append({"points": pts, "radius": s.get("radius", 40),
+                            "feather": s.get("feather", 0.5),
+                            "mode": s.get("mode", "brush")})
+        clean.append({"id": layer.get("id"), "strokes": strokes,
+                      "strength": layer.get("strength", 1.0),
+                      "visible": layer.get("visible", True),
+                      "adjustments": layer.get("adjustments") or {}})
+    return clean
+
+
+@bp.post("/local-adjust")
+def run_local_adjust():
+    """实时预览：在图像工作副本上叠加全部局部调整图层，结果进缓存。"""
+    data = request.get_json(silent=True) or {}
+    layers = _sanitize_layers(data.get("layers"))
+    params = {"layers": layers}
+    res, err = _run_op(data.get("image_id"), "local_adjust", params,
+                       local_adjust.local_adjust)
+    if err:
+        return err[0], err[1]
+    return jsonify(res)
+
+
+@bp.post("/local-adjust/save")
+def save_local_adjust():
+    """把局部调整结果落盘为一张新图像，可继续叠加其它处理。
+
+    也可以基于任意已有结果图（result_id）继续处理，实现多次处理的串联。
+    """
+    data = request.get_json(silent=True) or {}
+    layers = _sanitize_layers(data.get("layers"))
+    result_id = data.get("result_id")
+    image_id = data.get("image_id")
+
+    if result_id:
+        img = cache.result_image(result_id)
+        if img is None:
+            return jsonify({"error": "结果不存在"}), 404
+        source_name = "局部调整结果"
+    elif image_id:
+        rec0 = image_store.get(image_id)
+        if not rec0:
+            return jsonify({"error": "图像不存在"}), 404
+        img = Image.open(image_store.file_path(image_id))
+        source_name = rec0.get("filename", "image")
+    else:
+        return jsonify({"error": "缺少 image_id 或 result_id"}), 400
+
+    work = util.downscale_to_max(util.ensure_rgb(img), config.MAX_DIM)
+    out, meta = local_adjust.apply_layers(work, layers)
+
+    buf = io.BytesIO()
+    out.save(buf, "PNG")
+    base_name = (source_name or "image").rsplit(".", 1)[0]
+    rec = image_store.save_upload(buf.getvalue(), f"{base_name}_局部调整.png")
+    return jsonify({"image": _image_view(rec), **meta})
 
 
 # ---------------------------------------------------------------------------

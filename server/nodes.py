@@ -9,6 +9,7 @@ from .algorithms import detection as _detection
 from .algorithms import features as _features
 from .algorithms import filters as _filters
 from .algorithms import geometry as _geometry
+from .algorithms import local_adjust as _local_adjust
 from .algorithms import segmentation as _segmentation
 from .algorithms import style as _style
 
@@ -80,6 +81,13 @@ NODES["saturation"] = _node(
     "saturation", "饱和度", "滤镜",
     [_range("amount", "饱和度", -100, 100, 1, 0)],
     _filters.saturation, desc="调整色彩饱和度")
+
+NODES["local_adjust"] = _node(
+    "local_adjust", "局部调整", "滤镜",
+    [],
+    _local_adjust.local_adjust,
+    default_overrides={"layers": []},
+    desc="画笔涂抹区域的亮度/对比度/饱和度/色温（由局部调整视图生成参数）")
 
 NODES["blur"] = _node(
     "blur", "模糊", "滤镜",
